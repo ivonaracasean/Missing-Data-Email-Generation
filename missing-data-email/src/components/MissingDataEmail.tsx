@@ -1,34 +1,45 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import axios from "axios";
 import { extractedVariables, ticket } from "../utils/ticket";
-import { generatePrompt } from "../utils/prompt";
-import { OpenAI } from "openai";
-import emailjs from "emailjs-com";
 import "../styles/MissingDataEmail.css";
 
-const openai = new OpenAI({
-    apiKey: process.env.REACT_APP_OPENAI_API_KEY,
-    dangerouslyAllowBrowser: true,
-});
+const BACKEND_URL = "http://localhost:4000";
 
-export const detectMissingVariables = (extractedVariables: Record<string, any>): string[] => {
-    return Object.keys(extractedVariables).filter((key) => extractedVariables[key] === undefined);
+export const detectMissingVariables = (vars: Record<string, any>): string[] => {
+    return Object.keys(vars).filter((key) => vars[key] === undefined);
+};
+
+type EmailPreview = {
+    from: string;
+    subject: string;
+    date: string;
+    snippet: string;
 };
 
 const MissingDataEmail: React.FC = () => {
     const [missingVariables, setMissingVariables] = useState<string[]>([]);
     const [generatedEmail, setGeneratedEmail] = useState<string>("");
+    const [inbox, setInbox] = useState<EmailPreview[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [isEditable, setIsEditable] = useState(false);
     const [emailSent, setEmailSent] = useState<boolean>(false);
+    const [inboxSummary, setInboxSummary] = useState<string | null>(null);
 
-    // Function to generate email using OpenAI
+    const fetchInbox = async () => {
+        try {
+            const res = await axios.get(`${BACKEND_URL}/inbox`);
+            setInbox(res.data.emails);
+        } catch (err) {
+            console.error("Error loading inbox:", err);
+        }
+    };
+
     const handleGenerateEmail = async () => {
         setGeneratedEmail("");
         setError(null);
         setLoading(true);
 
-        // Detect missing variables
         const missing = detectMissingVariables(extractedVariables);
         setMissingVariables(missing);
 
@@ -37,45 +48,29 @@ const MissingDataEmail: React.FC = () => {
             return;
         }
 
-        // Generate the AI prompt
-        const prompt = generatePrompt(missing, ticket.ticketName);
-
         try {
-            const response = await openai.chat.completions.create({
-                model: "gpt-3.5-turbo",
-                messages: [{ role: "system", content: prompt }],
+            const res = await axios.post(`${BACKEND_URL}/generate-email`, {
+                ticketName: ticket.ticketName,
+                missingVariables: missing
             });
-
-            setGeneratedEmail(response.choices[0]?.message?.content || "Error generating email.");
+            setGeneratedEmail(res.data.result);
         } catch (err) {
-            console.error("Error fetching OpenAI response:", err);
+            console.error("Error generating email:", err);
             setError("Failed to generate email.");
         } finally {
             setLoading(false);
         }
     };
 
-    // Function to toggle edit mode
-    const toggleEditEmail = () => {
-        setIsEditable((prev) => !prev);
-    };
-
     const handleSendEmail = async () => {
         if (!generatedEmail) return;
 
-        const serviceID = process.env.REACT_APP_SERVICE_ID || "";
-        const userID = process.env.REACT_APP_USER_ID || "";
-        const templateID = process.env.REACT_APP_TEMPLATE_ID || "";
-
-        const emailParams = {
-            to_email: ticket.issuer,
-            from_name: "User1",
-            subject: `Missing Information for Ticket: ${ticket.ticketName}`,
-            message: generatedEmail,
-        };
-
         try {
-            await emailjs.send(serviceID, templateID, emailParams, userID);
+            await axios.post(`${BACKEND_URL}/send-email`, {
+                to: ticket.issuer,
+                subject: `Missing Information for Ticket: ${ticket.ticketName}`,
+                body: generatedEmail
+            });
             setEmailSent(true);
             alert("Email sent successfully!");
         } catch (err) {
@@ -84,23 +79,36 @@ const MissingDataEmail: React.FC = () => {
         }
     };
 
+    const handleSummarizeInbox = async () => {
+        try {
+            const response = await axios.post(`${BACKEND_URL}/summarize-inbox`);
+            setInboxSummary(response.data.result);
+        } catch (err) {
+            console.error("Error summarizing inbox:", err);
+            alert("Failed to summarize inbox");
+        }
+    };
+
+    useEffect(() => {
+        fetchInbox();
+    }, []);
+
     return (
         <div className="container">
             <h2>Missing Data Email Generator</h2>
 
-            {/* Ticket Details */}
             <div className="section">
                 <h3>Ticket Details</h3>
                 <pre>{JSON.stringify(ticket, null, 2)}</pre>
             </div>
 
-            {/* Extracted Variables */}
             <div className="section">
                 <h3>Extracted Variables</h3>
                 <ul>
                     {Object.entries(extractedVariables).map(([key, value]) => (
                         <li key={key}>
-                            <strong>{key}:</strong> {value !== undefined ? value.toString() : <span className="missing">Missing</span>}
+                            <strong>{key}:</strong> {value !== undefined ? value.toString() :
+                            <span className="missing">Missing</span>}
                         </li>
                     ))}
                 </ul>
@@ -110,7 +118,6 @@ const MissingDataEmail: React.FC = () => {
                 {loading ? "Generating..." : "Generate Email"}
             </button>
 
-            {/* Display Missing Variables */}
             {missingVariables.length > 0 && (
                 <div className="section">
                     <h3 className="missing">Missing Variables:</h3>
@@ -122,7 +129,6 @@ const MissingDataEmail: React.FC = () => {
                 </div>
             )}
 
-            {/* Editable Email Textbox + Toggle Button */}
             {generatedEmail && (
                 <div className="section">
                     <h3>Generated Email:</h3>
@@ -133,8 +139,8 @@ const MissingDataEmail: React.FC = () => {
                         readOnly={!isEditable}
                     />
                     <div className="button-group">
-                        <button className="button" onClick={toggleEditEmail}>
-                            {isEditable ? "Email is Ready" : "Modify Email"}
+                        <button className="button" onClick={() => setIsEditable(!isEditable)}>
+                            {isEditable ? "Done Editing" : "Edit Email"}
                         </button>
                         <button className="button send-button" onClick={handleSendEmail} disabled={emailSent}>
                             {emailSent ? "Email Sent" : "Send Email"}
@@ -143,8 +149,35 @@ const MissingDataEmail: React.FC = () => {
                 </div>
             )}
 
-            {/* Display Error (if any) */}
             {error && <div className="error">{error}</div>}
+
+            <div className="section">
+                <h3>📥 Recent Inbox Emails</h3>
+                {inbox.length === 0 ? (
+                    <p>No recent emails found.</p>
+                ) : (
+                    <ul>
+                        {inbox.map((email, index) => (
+                            <li key={index}>
+                                <strong>From:</strong> {email.from}<br/>
+                                <strong>Subject:</strong> {email.subject}<br/>
+                                <strong>Date:</strong> {new Date(email.date).toLocaleString()}<br/>
+                                <strong>Preview:</strong> {email.snippet}
+                            </li>
+                        ))}
+                    </ul>
+                )}
+            </div>
+            <div className="section">
+                <h3>AI Inbox Summary</h3>
+                <button className="button" onClick={handleSummarizeInbox}>Summarize Inbox</button>
+
+                {inboxSummary && (
+                    <pre style={{marginTop: "10px", background: "#f4f4f4", padding: "10px", borderRadius: "5px"}}>
+      {inboxSummary}
+    </pre>
+                )}
+            </div>
         </div>
     );
 };
